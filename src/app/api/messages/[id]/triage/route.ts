@@ -94,11 +94,12 @@ export async function POST(
 
     if (error instanceof AppError) {
       const safe = toSafeError(error);
+      const manuallyRetryable = safe.retryable || error.code === "cancelled";
       return errorResponse(
         statusForAppError(error),
         safe.code.toUpperCase(),
         safe.message,
-        safe.retryable,
+        manuallyRetryable,
         error.retryAfterMs === undefined
           ? undefined
           : Math.max(1, Math.ceil(error.retryAfterMs / 1_000)),

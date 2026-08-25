@@ -49,6 +49,7 @@ const RETRYABLE_PERSISTED_ERROR_CODES = new Set([
   "NETWORK",
   "PROVIDER_UNAVAILABLE",
   "PROCESS_INTERRUPTED",
+  "CANCELLED",
 ]);
 
 export function isPersistedRunRetryable(

@@ -257,23 +257,25 @@ describe("POST /api/messages/[id]/triage", () => {
   );
 
   it.each([
-    ["rate_limit", 429, true],
-    ["quota_exceeded", 429, false],
-    ["timeout", 504, true],
-    ["configuration", 503, false],
-    ["authentication", 502, false],
-    ["permission_denied", 502, false],
-    ["refusal", 502, false],
-    ["policy_violation", 502, false],
-    ["invalid_output", 502, false],
-    ["network", 503, true],
-    ["provider_unavailable", 503, true],
-    ["cancelled", 408, false],
-    ["unknown", 502, false],
+    ["rate_limit", 429, true, true],
+    ["quota_exceeded", 429, false, false],
+    ["timeout", 504, true, true],
+    ["configuration", 503, false, false],
+    ["authentication", 502, false, false],
+    ["permission_denied", 502, false, false],
+    ["refusal", 502, false, false],
+    ["policy_violation", 502, false, false],
+    ["invalid_output", 502, false, false],
+    ["network", 503, true, true],
+    ["provider_unavailable", 503, true, true],
+    ["cancelled", 408, false, true],
+    ["unknown", 502, false, false],
   ] as const)(
     "maps %s provider errors to HTTP %i",
-    async (code, status, retryable) => {
-      triageMessageMock.mockRejectedValue(new AppError(code, { retryable }));
+    async (code, status, internalRetryable, responseRetryable) => {
+      triageMessageMock.mockRejectedValue(
+        new AppError(code, { retryable: internalRetryable }),
+      );
 
       const response = await request("inb-001");
       const body = (await response.json()) as {
@@ -289,7 +291,7 @@ describe("POST /api/messages/[id]/triage", () => {
       }
       expect(body.error).toMatchObject({
         code: code.toUpperCase(),
-        retryable,
+        retryable: responseRetryable,
       });
     },
   );

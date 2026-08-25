@@ -527,7 +527,40 @@ describe("TriageDashboard", () => {
     ).toBeDisabled();
   });
 
-  it("batches only retryable failures and allows interrupted work to resume", async () => {
+  it("allows a manual retry after a persisted cancellation", () => {
+    const source = message("inb-001", "Alpha request", "Original message.");
+    const cancelled: DashboardTriageRun = {
+      ...successfulRun(source.id),
+      status: "failed",
+      summary: null,
+      category: null,
+      priority: null,
+      suggestedNextAction: null,
+      errorCode: "CANCELLED",
+      errorMessage: "The analysis was cancelled.",
+    };
+
+    render(
+      <TriageDashboard
+        initialData={{
+          messages: [{ ...source, latestRun: cancelled }],
+          provider: {
+            name: "anthropic",
+            model: "claude-sonnet-5",
+            configured: true,
+          },
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", {
+        name: "Retry inb-001: Alpha request",
+      }),
+    ).toBeEnabled();
+  });
+
+  it("batches retryable failures while skipping completed and permanent runs", async () => {
     const permanentSource = message(
       "inb-001",
       "Permanent failure",
@@ -536,6 +569,21 @@ describe("TriageDashboard", () => {
     const interruptedSource = message(
       "inb-002",
       "Interrupted work",
+      "Original message.",
+    );
+    const completedSource = message(
+      "inb-003",
+      "Completed work",
+      "Original message.",
+    );
+    const reviewSource = message(
+      "inb-004",
+      "Reviewed work",
+      "Original message.",
+    );
+    const cancelledSource = message(
+      "inb-005",
+      "Cancelled work",
       "Original message.",
     );
     const permanent: DashboardTriageRun = {
@@ -554,14 +602,29 @@ describe("TriageDashboard", () => {
       errorMessage:
         "Analysis was interrupted before it completed. Please retry.",
     };
-    const fetchMock = vi.fn<typeof fetch>(async () =>
-      jsonResponse({
+    const completed = successfulRun(completedSource.id);
+    const review: DashboardTriageRun = {
+      ...successfulRun(reviewSource.id),
+      status: "needs_review",
+      reviewReasons: ["low_context"],
+    };
+    const cancelled: DashboardTriageRun = {
+      ...permanent,
+      errorCode: "CANCELLED",
+      errorMessage: "The analysis was cancelled.",
+    };
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      const retriedSource = url.includes(interruptedSource.id)
+        ? interruptedSource
+        : cancelledSource;
+      return jsonResponse({
         message: {
-          ...interruptedSource,
-          latestRun: successfulRun(interruptedSource.id),
+          ...retriedSource,
+          latestRun: successfulRun(retriedSource.id),
         },
-      }),
-    );
+      });
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     render(
@@ -570,6 +633,9 @@ describe("TriageDashboard", () => {
           messages: [
             { ...permanentSource, latestRun: permanent },
             { ...interruptedSource, latestRun: interrupted },
+            { ...completedSource, latestRun: completed },
+            { ...reviewSource, latestRun: review },
+            { ...cancelledSource, latestRun: cancelled },
           ],
           provider: {
             name: "anthropic",
@@ -590,12 +656,23 @@ describe("TriageDashboard", () => {
         name: "Retry inb-002: Interrupted work",
       }),
     ).toBeEnabled();
+    expect(
+      screen.getByRole("button", {
+        name: "Retry inb-005: Cancelled work",
+      }),
+    ).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: "Analyze all" }));
 
-    expect(await screen.findByText("Summary for inb-002.")).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("inb-002");
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(requestedUrls).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("inb-002"),
+        expect.stringContaining("inb-005"),
+      ]),
+    );
+    expect(requestedUrls.join(" ")).not.toMatch(/inb-001|inb-003|inb-004/u);
   });
 
   it("explains truncation and suspicious instructions on review rows", () => {

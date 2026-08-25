@@ -677,7 +677,7 @@ h1 {
 }
 
 .result-label,
-.next-action > span {
+.next-action > span:first-child {
   flex: none;
   color: var(--accent);
   font-size: 0.56rem;

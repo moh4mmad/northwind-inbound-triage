@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   dashboardMessageSchema,
+  isPersistedRunRetryable,
   toDashboardMessage,
 } from "@/lib/domain/dashboard";
 import type { MessageView } from "@/lib/domain/schemas";
@@ -16,6 +17,19 @@ const source = {
 };
 
 describe("dashboard DTO", () => {
+  it.each([
+    ["CANCELLED", true],
+    ["PROCESS_INTERRUPTED", true],
+    ["TIMEOUT", true],
+    ["CONFIGURATION", false],
+    [null, false],
+  ] as const)(
+    "maps persisted error %s to manual retryability",
+    (errorCode, expected) => {
+      expect(isPersistedRunRetryable(errorCode)).toBe(expected);
+    },
+  );
+
   it("keeps provider and accounting metadata on the server", () => {
     const internal = {
       ...source,
