@@ -1,5 +1,10 @@
 import type { InboundMessage } from "@/lib/domain/schemas";
-import { CATEGORY_DEFINITIONS, CATEGORY_KEYS, PRIORITY_DEFINITIONS, PRIORITY_KEYS } from "@/lib/domain/taxonomy";
+import {
+  CATEGORY_DEFINITIONS,
+  CATEGORY_KEYS,
+  PRIORITY_DEFINITIONS,
+  PRIORITY_KEYS,
+} from "@/lib/domain/taxonomy";
 
 export const PROMPT_VERSION = "triage-v1";
 

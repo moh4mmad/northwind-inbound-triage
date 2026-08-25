@@ -19,19 +19,22 @@ export const inboundMessageSchema = z
   })
   .strict();
 
-export const inboundMessagesSchema = z.array(inboundMessageSchema).min(1).superRefine((items, ctx) => {
-  const seen = new Set<string>();
-  items.forEach((item, index) => {
-    if (seen.has(item.id)) {
-      ctx.addIssue({
-        code: "custom",
-        message: `Duplicate message id: ${item.id}`,
-        path: [index, "id"],
-      });
-    }
-    seen.add(item.id);
+export const inboundMessagesSchema = z
+  .array(inboundMessageSchema)
+  .min(1)
+  .superRefine((items, ctx) => {
+    const seen = new Set<string>();
+    items.forEach((item, index) => {
+      if (seen.has(item.id)) {
+        ctx.addIssue({
+          code: "custom",
+          message: `Duplicate message id: ${item.id}`,
+          path: [index, "id"],
+        });
+      }
+      seen.add(item.id);
+    });
   });
-});
 
 const oneLine = z
   .string()
@@ -108,7 +111,10 @@ export const triageWireJsonSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
-    summary: { type: "string", description: "A concise, factual one-line summary." },
+    summary: {
+      type: "string",
+      description: "A concise, factual one-line summary.",
+    },
     category: { type: "string", enum: [...CATEGORY_KEYS] },
     priority: { type: "string", enum: [...PRIORITY_KEYS] },
     suggestedNextAction: {

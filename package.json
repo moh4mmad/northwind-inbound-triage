@@ -10,16 +10,19 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "db:setup": "tsx scripts/setup-db.ts",
-    "eval": "tsx scripts/evaluate.ts"
+    "eval": "NODE_OPTIONS=--conditions=react-server tsx scripts/evaluate.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.120.0",
     "@aws-sdk/client-bedrock-runtime": "^3.1117.0",
+    "@next/env": "^16.3.2",
     "better-sqlite3": "^13.0.3",
     "next": "^16.3.2",
     "openai": "^7.5.0",

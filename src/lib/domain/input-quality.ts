@@ -4,7 +4,8 @@ import type { InputQuality } from "./taxonomy";
 const MAX_PROMPT_BODY_CHARS = 8_000;
 const SENTINEL_ORGANIZATIONS = new Set(["", "(individual)", "(unknown)"]);
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/gu;
-const GARBLED_MARKERS = /(?:\uFFFD{2,}|content-type:\s*multipart|forwarded message truncated|=\?utf-8\?[bq]\?)/iu;
+const GARBLED_MARKERS =
+  /(?:\uFFFD{2,}|content-type:\s*multipart|forwarded message truncated|=\?utf-8\?[bq]\?)/iu;
 
 export interface QualityAssessment {
   quality: InputQuality;
@@ -28,17 +29,22 @@ export function assessInputQuality(message: InboundMessage): QualityAssessment {
   CONTROL_CHARACTERS.lastIndex = 0;
 
   if (semanticLength(combined) < 3) reasons.push("near_empty");
-  if (hasControlCharacters || GARBLED_MARKERS.test(`${message.from_name} ${combined}`)) {
+  if (
+    hasControlCharacters ||
+    GARBLED_MARKERS.test(`${message.from_name} ${combined}`)
+  ) {
     reasons.push("garbled_or_truncated");
   }
   if (!message.from_name.trim()) reasons.push("missing_sender");
   if (!message.subject.trim()) reasons.push("missing_subject");
-  if (normalizeOrganization(message.from_org) === null) reasons.push("unknown_organization");
+  if (normalizeOrganization(message.from_org) === null)
+    reasons.push("unknown_organization");
 
   const wordCount = combined.split(/\s+/u).filter(Boolean).length;
   if (
     wordCount < 8 ||
-    (/\bfollowing up\b/iu.test(combined) && !/\b(client|planning|portfolio|referral|vendor|recruit)/iu.test(combined))
+    (/\bfollowing up\b/iu.test(combined) &&
+      !/\b(client|planning|portfolio|referral|vendor|recruit)/iu.test(combined))
   ) {
     reasons.push("low_context");
   }
@@ -49,7 +55,8 @@ export function assessInputQuality(message: InboundMessage): QualityAssessment {
     reasons.push("prompt_truncated");
   }
 
-  const malformed = reasons.includes("near_empty") || reasons.includes("garbled_or_truncated");
+  const malformed =
+    reasons.includes("near_empty") || reasons.includes("garbled_or_truncated");
   const lowSignal = reasons.includes("low_context");
 
   return {
