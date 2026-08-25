@@ -1,0 +1,15 @@
+[
+  { "id": "inb-001", "category": "prospect", "priority": "medium" },
+  { "id": "inb-002", "category": "existing_client", "priority": "high" },
+  { "id": "inb-003", "category": "vendor", "priority": "low" },
+  { "id": "inb-004", "category": "recruiting", "priority": "low" },
+  { "id": "inb-005", "category": "existing_client", "priority": "high" },
+  { "id": "inb-006", "category": "prospect", "priority": "low" },
+  { "id": "inb-007", "category": "partnership", "priority": "medium" },
+  { "id": "inb-008", "category": "newsletter_spam", "priority": "low" },
+  { "id": "inb-009", "category": "unknown", "priority": "low" },
+  { "id": "inb-010", "category": "unknown", "priority": "low" },
+  { "id": "inb-011", "category": "unknown", "priority": "low" },
+  { "id": "inb-012", "category": "existing_client", "priority": "medium" },
+  { "id": "inb-013", "category": "prospect", "priority": "medium" }
+]
