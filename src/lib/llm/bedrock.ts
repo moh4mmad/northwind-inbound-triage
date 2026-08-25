@@ -6,7 +6,15 @@ import {
   type ConverseCommandOutput,
 } from "@aws-sdk/client-bedrock-runtime";
 import { providerError, toProviderError } from "./errors";
-import { parseStructuredOutput } from "./structured-output";
+import { MAX_PROVIDER_ATTEMPT_TIMEOUT_MS } from "./limits";
+import {
+  sanitizeModelForDisplay,
+  supportsBedrockStructuredTriage,
+} from "./model-capabilities";
+import {
+  parseStructuredOutput,
+  transformBedrockStructuredOutputSchema,
+} from "./structured-output";
 import {
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_TRIAGE_SCHEMA_NAME,
@@ -20,6 +28,7 @@ export type BedrockClientLike = Pick<BedrockRuntimeClient, "send">;
 export interface BedrockTriageProviderOptions {
   region: string;
   model: string;
+  timeoutMs: number;
 }
 
 export class BedrockTriageProvider implements TriageProvider {
@@ -34,7 +43,11 @@ export class BedrockTriageProvider implements TriageProvider {
   ) {
     if (
       options.region.trim().length === 0 ||
-      options.model.trim().length === 0
+      options.model.trim().length === 0 ||
+      !supportsBedrockStructuredTriage(options.model) ||
+      !Number.isFinite(options.timeoutMs) ||
+      options.timeoutMs <= 0 ||
+      options.timeoutMs > MAX_PROVIDER_ATTEMPT_TIMEOUT_MS
     ) {
       throw providerError("configuration", this.name);
     }
@@ -43,13 +56,20 @@ export class BedrockTriageProvider implements TriageProvider {
     this.client =
       client ??
       new BedrockRuntimeClient({
-        region: options.region,
+        region: options.region.trim(),
         maxAttempts: 1,
+        requestHandler: {
+          connectionTimeout: Math.min(5_000, options.timeoutMs),
+          requestTimeout: options.timeoutMs,
+        },
       });
   }
 
   async analyze(request: TriageProviderRequest): Promise<TriageProviderResult> {
     try {
+      const outputSchema = transformBedrockStructuredOutputSchema(
+        request.schema,
+      );
       const command = new ConverseCommand({
         modelId: this.model,
         system: [{ text: request.systemPrompt }],
@@ -70,7 +90,7 @@ export class BedrockTriageProvider implements TriageProvider {
                 name: request.schemaName ?? DEFAULT_TRIAGE_SCHEMA_NAME,
                 description:
                   "A validated classification of one inbound message.",
-                schema: JSON.stringify(request.schema),
+                schema: JSON.stringify(outputSchema),
               },
             },
           },
@@ -103,7 +123,7 @@ export class BedrockTriageProvider implements TriageProvider {
       return {
         output: parseStructuredOutput(text, this.name),
         provider: this.name,
-        model: this.model,
+        model: sanitizeModelForDisplay(this.name, this.model),
         usage: {
           inputTokens: response.usage?.inputTokens ?? null,
           outputTokens: response.usage?.outputTokens ?? null,

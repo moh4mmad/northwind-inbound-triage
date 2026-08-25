@@ -1,5 +1,10 @@
 import type { ProviderName } from "@/lib/domain/taxonomy";
 import { providerError, toProviderError, withAttemptCount } from "./errors";
+import {
+  MAX_PROVIDER_ATTEMPTS,
+  MAX_PROVIDER_ATTEMPT_TIMEOUT_MS,
+  MAX_PROVIDER_OVERALL_TIMEOUT_MS,
+} from "./limits";
 import type {
   TriageProvider,
   TriageProviderRequest,
@@ -15,10 +20,12 @@ export interface ProviderRetryOptions {
   provider: ProviderName;
   maxAttempts: number;
   timeoutMs: number;
+  overallTimeoutMs: number;
   signal?: AbortSignal;
   baseDelayMs?: number;
   random?: () => number;
   sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+  now?: () => number;
 }
 
 export interface ProviderRetryResult<T> {
@@ -34,11 +41,18 @@ export async function withProviderRetry<T>(
 
   const sleep = options.sleep ?? abortableSleep;
   const random = options.random ?? Math.random;
+  const now = options.now ?? Date.now;
   const baseDelayMs = options.baseDelayMs ?? 250;
+  const deadlineMs = now() + options.overallTimeoutMs;
 
   for (let attempt = 1; attempt <= options.maxAttempts; attempt += 1) {
     try {
-      const value = await runBoundedAttempt(operation, attempt, options);
+      const value = await runBoundedAttempt(
+        operation,
+        attempt,
+        options,
+        remainingAttemptTime(deadlineMs, now, options, attempt),
+      );
       return { value, attempts: attempt };
     } catch (error) {
       const normalized = toProviderError(error, options.provider);
@@ -48,10 +62,23 @@ export async function withProviderRetry<T>(
 
       const exponentialDelay = baseDelayMs * 2 ** (attempt - 1);
       const jitterMultiplier = 0.75 + random() * 0.5;
+      const retryDelayMs = Math.max(
+        Math.round(exponentialDelay * jitterMultiplier),
+        normalized.retryAfterMs ?? 0,
+      );
+      const remainingMs = deadlineMs - now();
+      if (remainingMs <= 0 || retryDelayMs >= remainingMs) {
+        throw withAttemptCount(
+          providerError("timeout", options.provider, { retryable: true }),
+          attempt,
+        );
+      }
       try {
-        await sleep(
-          Math.round(exponentialDelay * jitterMultiplier),
-          options.signal,
+        await runBoundedAttempt(
+          ({ signal }) => sleep(retryDelayMs, signal),
+          attempt,
+          options,
+          remainingMs,
         );
       } catch (sleepError) {
         throw withAttemptCount(
@@ -84,6 +111,7 @@ async function runBoundedAttempt<T>(
   operation: (context: RetryContext) => Promise<T>,
   attempt: number,
   options: ProviderRetryOptions,
+  timeoutMs: number,
 ): Promise<T> {
   if (options.signal?.aborted) {
     throw providerError("cancelled", options.provider, {
@@ -119,7 +147,7 @@ async function runBoundedAttempt<T>(
     });
     controller.abort(timeoutError);
     rejectBoundary?.(timeoutError);
-  }, options.timeoutMs);
+  }, timeoutMs);
 
   try {
     return await Promise.race([
@@ -144,15 +172,34 @@ async function runBoundedAttempt<T>(
 }
 
 function assertRetryOptions(options: ProviderRetryOptions): void {
-  if (!Number.isInteger(options.maxAttempts) || options.maxAttempts < 1) {
+  if (
+    !Number.isInteger(options.maxAttempts) ||
+    options.maxAttempts < 1 ||
+    options.maxAttempts > MAX_PROVIDER_ATTEMPTS
+  ) {
     throw providerError("configuration", options.provider, {
       safeMessage: "The AI retry policy is not configured correctly.",
     });
   }
 
-  if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
+  if (
+    !Number.isFinite(options.timeoutMs) ||
+    options.timeoutMs <= 0 ||
+    options.timeoutMs > MAX_PROVIDER_ATTEMPT_TIMEOUT_MS
+  ) {
     throw providerError("configuration", options.provider, {
       safeMessage: "The AI timeout is not configured correctly.",
+    });
+  }
+
+  if (
+    !Number.isFinite(options.overallTimeoutMs) ||
+    options.overallTimeoutMs <= 0 ||
+    options.overallTimeoutMs > MAX_PROVIDER_OVERALL_TIMEOUT_MS ||
+    options.overallTimeoutMs < options.timeoutMs
+  ) {
+    throw providerError("configuration", options.provider, {
+      safeMessage: "The overall AI deadline is not configured correctly.",
     });
   }
 
@@ -164,6 +211,22 @@ function assertRetryOptions(options: ProviderRetryOptions): void {
       safeMessage: "The AI retry delay is not configured correctly.",
     });
   }
+}
+
+function remainingAttemptTime(
+  deadlineMs: number,
+  now: () => number,
+  options: ProviderRetryOptions,
+  attempt: number,
+): number {
+  const remainingMs = deadlineMs - now();
+  if (remainingMs <= 0) {
+    throw withAttemptCount(
+      providerError("timeout", options.provider, { retryable: true }),
+      attempt,
+    );
+  }
+  return Math.min(options.timeoutMs, remainingMs);
 }
 
 async function abortableSleep(

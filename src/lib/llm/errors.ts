@@ -1,15 +1,18 @@
 import type { ProviderName } from "@/lib/domain/taxonomy";
+import { MAX_PROVIDER_RETRY_AFTER_MS } from "./limits";
 
 export const APP_ERROR_CODES = [
   "configuration",
   "authentication",
   "permission_denied",
+  "quota_exceeded",
   "rate_limit",
   "timeout",
   "network",
   "provider_unavailable",
   "refusal",
   "invalid_output",
+  "policy_violation",
   "cancelled",
   "unknown",
 ] as const;
@@ -20,6 +23,8 @@ const SAFE_MESSAGES: Record<AppErrorCode, string> = {
   configuration: "The selected AI provider is not configured correctly.",
   authentication: "The AI provider rejected its credentials.",
   permission_denied: "The AI provider denied access to the configured model.",
+  quota_exceeded:
+    "The AI provider account has reached its usage or billing limit.",
   rate_limit:
     "The AI provider is temporarily rate limited. Please retry shortly.",
   timeout: "The AI provider took too long to respond.",
@@ -27,6 +32,8 @@ const SAFE_MESSAGES: Record<AppErrorCode, string> = {
   provider_unavailable: "The AI provider is temporarily unavailable.",
   refusal: "The AI provider could not classify this message.",
   invalid_output: "The AI provider returned an invalid response.",
+  policy_violation:
+    "The AI provider returned a suggested action that did not pass safety checks.",
   cancelled: "The analysis was cancelled.",
   unknown: "The AI provider request failed.",
 };
@@ -37,6 +44,7 @@ export interface AppErrorOptions {
   safeMessage?: string;
   httpStatus?: number;
   attempts?: number;
+  retryAfterMs?: number;
   cause?: unknown;
 }
 
@@ -47,6 +55,7 @@ export class AppError extends Error {
   readonly safeMessage: string;
   readonly httpStatus?: number;
   readonly attempts: number;
+  readonly retryAfterMs?: number;
 
   constructor(code: AppErrorCode, options: AppErrorOptions = {}) {
     const safeMessage = options.safeMessage ?? SAFE_MESSAGES[code];
@@ -61,6 +70,7 @@ export class AppError extends Error {
     this.safeMessage = safeMessage;
     this.httpStatus = options.httpStatus;
     this.attempts = options.attempts ?? 1;
+    this.retryAfterMs = options.retryAfterMs;
   }
 }
 
@@ -118,6 +128,7 @@ export function toProviderError(
       safeMessage: error.safeMessage,
       httpStatus: error.httpStatus,
       attempts: error.attempts,
+      retryAfterMs: error.retryAfterMs,
       cause: error,
     });
   }
@@ -128,6 +139,14 @@ export function toProviderError(
       ? reportedName
       : readConstructorName(error);
   const status = readStatus(error);
+  const providerCode = readProviderCode(error);
+
+  if (isPermanentQuotaError(errorName, providerCode)) {
+    return providerError("quota_exceeded", provider, {
+      httpStatus: status,
+      cause: error,
+    });
+  }
 
   if (isAuthenticationError(errorName, status)) {
     return providerError("authentication", provider, {
@@ -147,6 +166,7 @@ export function toProviderError(
     return providerError("rate_limit", provider, {
       retryable: true,
       httpStatus: status,
+      retryAfterMs: readRetryAfterMs(error),
       cause: error,
     });
   }
@@ -197,8 +217,65 @@ export function withAttemptCount(
     safeMessage: error.safeMessage,
     httpStatus: error.httpStatus,
     attempts,
+    retryAfterMs: error.retryAfterMs,
     cause: error,
   });
+}
+
+export function providerResponseError(
+  code: string | null | undefined,
+  provider: ProviderName,
+): ProviderError {
+  const normalized = code?.trim().toLowerCase();
+
+  if (
+    normalized === "insufficient_quota" ||
+    normalized === "billing_hard_limit_reached" ||
+    normalized === "billing_not_active" ||
+    normalized === "usage_limit_reached" ||
+    normalized === "quota_exceeded"
+  ) {
+    return providerError("quota_exceeded", provider);
+  }
+  if (normalized === "rate_limit_exceeded" || normalized === "rate_limit") {
+    return providerError("rate_limit", provider, { retryable: true });
+  }
+  if (
+    normalized === "authentication_error" ||
+    normalized === "invalid_api_key"
+  ) {
+    return providerError("authentication", provider);
+  }
+  if (normalized === "permission_denied") {
+    return providerError("permission_denied", provider);
+  }
+  if (
+    normalized === "invalid_request_error" ||
+    normalized === "model_not_found" ||
+    normalized === "invalid_model"
+  ) {
+    return providerError("configuration", provider);
+  }
+  if (
+    normalized === "content_filter" ||
+    normalized === "safety_policy_violation"
+  ) {
+    return providerError("refusal", provider);
+  }
+  if (normalized === "cancelled" || normalized === "canceled") {
+    return providerError("cancelled", provider);
+  }
+  if (
+    normalized === "server_error" ||
+    normalized === "service_unavailable" ||
+    normalized === "overloaded"
+  ) {
+    return providerError("provider_unavailable", provider, {
+      retryable: true,
+    });
+  }
+
+  return providerError("unknown", provider);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -233,6 +310,83 @@ function readStatus(value: unknown): number | undefined {
   return undefined;
 }
 
+function readProviderCode(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  const direct = readString(value, "code");
+  if (direct) return direct;
+  return isRecord(value.error) ? readString(value.error, "code") : undefined;
+}
+
+function readRetryAfterMs(value: unknown): number | undefined {
+  if (!isRecord(value)) return undefined;
+
+  const direct = value.retryAfterMs;
+  if (typeof direct === "number" && Number.isFinite(direct) && direct >= 0) {
+    return capRetryAfter(direct);
+  }
+
+  const headers =
+    value.headers ??
+    (isRecord(value.$response) ? value.$response.headers : null);
+  const header = readHeader(headers, "retry-after");
+  if (!header) return undefined;
+
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return capRetryAfter(seconds * 1_000);
+  }
+
+  const retryAt = Date.parse(header);
+  if (!Number.isFinite(retryAt)) return undefined;
+  return capRetryAfter(Math.max(0, retryAt - Date.now()));
+}
+
+function readHeader(value: unknown, name: string): string | undefined {
+  if (!isRecord(value)) return undefined;
+
+  const get = value.get;
+  if (typeof get === "function") {
+    try {
+      const header = get.call(value, name) as unknown;
+      if (typeof header === "string") return header.trim();
+    } catch {
+      return undefined;
+    }
+  }
+
+  const entry = Object.entries(value).find(
+    ([key]) => key.toLowerCase() === name,
+  )?.[1];
+  if (typeof entry === "string") return entry.trim();
+  if (Array.isArray(entry) && typeof entry[0] === "string") {
+    return entry[0].trim();
+  }
+  return undefined;
+}
+
+function capRetryAfter(milliseconds: number): number {
+  // Keep provider hints useful without allowing a malformed response to hold a
+  // worker indefinitely. The overall retry deadline remains the final bound.
+  return Math.min(
+    MAX_PROVIDER_RETRY_AFTER_MS,
+    Math.max(0, Math.round(milliseconds)),
+  );
+}
+
+function isPermanentQuotaError(
+  name: string | undefined,
+  code: string | undefined,
+): boolean {
+  return (
+    name === "ServiceQuotaExceededException" ||
+    code?.toLowerCase() === "insufficient_quota" ||
+    code?.toLowerCase() === "billing_hard_limit_reached" ||
+    code?.toLowerCase() === "billing_not_active" ||
+    code?.toLowerCase() === "usage_limit_reached" ||
+    code?.toLowerCase() === "quota_exceeded"
+  );
+}
+
 function isAuthenticationError(
   name: string | undefined,
   status: number | undefined,
@@ -265,8 +419,7 @@ function isRateLimitError(
   return (
     status === 429 ||
     name === "RateLimitError" ||
-    name === "ThrottlingException" ||
-    name === "ServiceQuotaExceededException"
+    name === "ThrottlingException"
   );
 }
 

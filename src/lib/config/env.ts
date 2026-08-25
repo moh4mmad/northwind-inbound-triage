@@ -2,15 +2,31 @@ import "server-only";
 
 import { z } from "zod";
 import { PROVIDER_KEYS, type ProviderName } from "@/lib/domain/taxonomy";
+import {
+  DEFAULT_PROVIDER_OVERALL_TIMEOUT_MS,
+  DEFAULT_PROVIDER_TIMEOUT_MS,
+  MAX_PROVIDER_ATTEMPTS,
+  MAX_PROVIDER_ATTEMPT_TIMEOUT_MS,
+  MAX_PROVIDER_OVERALL_TIMEOUT_MS,
+} from "@/lib/llm/limits";
+import {
+  sanitizeModelForDisplay,
+  supportsAnthropicStructuredTriage,
+  supportsBedrockStructuredTriage,
+  supportsOpenAIStructuredTriage,
+} from "@/lib/llm/model-capabilities";
 
 const providerSchema = z.enum(PROVIDER_KEYS);
-const positiveInteger = (fallback: number) =>
+const boundedInteger = (fallback: number, minimum: number, maximum: number) =>
   z.coerce
     .number()
     .int()
-    .positive()
+    .min(minimum)
+    .max(maximum)
     .optional()
     .transform((value) => value ?? fallback);
+
+const MIN_PROVIDER_TIMEOUT_MS = 1_000;
 
 export interface RuntimeConfig {
   provider: ProviderName;
@@ -18,10 +34,13 @@ export interface RuntimeConfig {
   model: string;
   /** Safe model label suitable for logs, persistence, and API responses. */
   displayModel: string;
+  /** Local environment validation only; provider access is verified on invocation. */
   configured: boolean;
+  configurationStatus: "locally_configured" | "not_configured";
   apiKey?: string;
   awsRegion?: string;
   timeoutMs: number;
+  overallTimeoutMs: number;
   maxAttempts: number;
   databasePath: string;
 }
@@ -31,47 +50,64 @@ interface ProviderDetails {
   model: string;
   displayModel: string;
   configured: boolean;
+  configurationStatus: "locally_configured" | "not_configured";
   apiKey?: string;
   awsRegion?: string;
 }
 
 function readProviderDetails(): ProviderDetails {
   const provider = providerSchema.parse(
-    process.env.LLM_PROVIDER || "anthropic",
+    process.env.LLM_PROVIDER?.trim() || "anthropic",
   );
 
   if (provider === "anthropic") {
     const model = (process.env.ANTHROPIC_MODEL || "claude-sonnet-5").trim();
-    const validModel = /^claude-[a-z0-9._-]+$/u.test(model);
+    const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+    const supportedModel = supportsAnthropicStructuredTriage(model);
+    const configured = Boolean(apiKey && supportedModel);
     return {
       name: provider,
       model,
-      displayModel: validModel ? model : "Invalid Anthropic model ID",
-      configured: Boolean(process.env.ANTHROPIC_API_KEY && validModel),
-      apiKey: process.env.ANTHROPIC_API_KEY,
+      displayModel: supportedModel
+        ? model
+        : "Unsupported Anthropic model for structured triage",
+      configured,
+      configurationStatus: configured ? "locally_configured" : "not_configured",
+      apiKey,
     };
   }
 
   if (provider === "openai") {
     const model = (process.env.OPENAI_MODEL || "gpt-5.6-terra").trim();
+    const apiKey = process.env.OPENAI_API_KEY?.trim();
+    const supportedModel = supportsOpenAIStructuredTriage(model);
+    const configured = Boolean(apiKey && supportedModel);
     return {
       name: provider,
       model,
-      displayModel: model || "OpenAI model not configured",
-      configured: Boolean(process.env.OPENAI_API_KEY && model.trim()),
-      apiKey: process.env.OPENAI_API_KEY,
+      displayModel: supportedModel
+        ? model
+        : "Unsupported OpenAI model for structured triage",
+      configured,
+      configurationStatus: configured ? "locally_configured" : "not_configured",
+      apiKey,
     };
   }
 
   const model = (process.env.BEDROCK_MODEL_ID || "").trim();
   const awsRegion = process.env.AWS_REGION?.trim();
+  const supportedModel = supportsBedrockStructuredTriage(model);
+  const configured = Boolean(awsRegion && supportedModel);
   return {
     name: provider,
     model,
-    displayModel: model
-      ? model.split("/").at(-1) || model
-      : "Bedrock model not configured",
-    configured: Boolean(awsRegion && model),
+    displayModel: supportedModel
+      ? sanitizeModelForDisplay(provider, model)
+      : model
+        ? "Unsupported Bedrock Converse structured-output model"
+        : "Bedrock model not configured",
+    configured,
+    configurationStatus: configured ? "locally_configured" : "not_configured",
     awsRegion,
   };
 }
@@ -80,27 +116,49 @@ export function getProviderSelection(): {
   name: ProviderName;
   model: string;
   configured: boolean;
+  configurationStatus: "locally_configured" | "not_configured";
 } {
   const details = readProviderDetails();
   return {
     name: details.name,
     model: details.displayModel,
     configured: details.configured,
+    configurationStatus: details.configurationStatus,
   };
 }
 
 export function getRuntimeConfig(): RuntimeConfig {
   const details = readProviderDetails();
-  const timeoutMs = positiveInteger(25_000).parse(process.env.LLM_TIMEOUT_MS);
-  const maxAttempts = positiveInteger(2).parse(process.env.LLM_MAX_ATTEMPTS);
+  const providerTimeoutKey = `${details.name.toUpperCase()}_TIMEOUT_MS`;
+  const timeoutMs = boundedInteger(
+    DEFAULT_PROVIDER_TIMEOUT_MS[details.name],
+    MIN_PROVIDER_TIMEOUT_MS,
+    MAX_PROVIDER_ATTEMPT_TIMEOUT_MS,
+  ).parse(process.env[providerTimeoutKey] ?? process.env.LLM_TIMEOUT_MS);
+  const overallTimeoutMs = boundedInteger(
+    DEFAULT_PROVIDER_OVERALL_TIMEOUT_MS,
+    MIN_PROVIDER_TIMEOUT_MS,
+    MAX_PROVIDER_OVERALL_TIMEOUT_MS,
+  ).parse(process.env.LLM_OVERALL_TIMEOUT_MS);
+  const maxAttempts = boundedInteger(2, 1, MAX_PROVIDER_ATTEMPTS).parse(
+    process.env.LLM_MAX_ATTEMPTS,
+  );
+
+  if (overallTimeoutMs < timeoutMs) {
+    throw new RangeError(
+      "LLM_OVERALL_TIMEOUT_MS must be greater than or equal to the selected provider timeout",
+    );
+  }
 
   const common = {
     provider: details.name,
     model: details.model,
     displayModel: details.displayModel,
     configured: details.configured,
+    configurationStatus: details.configurationStatus,
     timeoutMs,
-    maxAttempts: Math.min(maxAttempts, 3),
+    overallTimeoutMs,
+    maxAttempts,
     databasePath: process.env.DATABASE_PATH || "./data/triage.sqlite",
   };
 

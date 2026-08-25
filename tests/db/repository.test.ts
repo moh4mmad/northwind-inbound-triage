@@ -80,6 +80,7 @@ describe("triage run lifecycle", () => {
       status: "processing",
       inputQuality: "valid",
       reviewReasons: ["unknown_organization"],
+      resolvedModel: null,
       attemptCount: 1,
       completedAt: null,
     });
@@ -126,6 +127,7 @@ describe("triage run lifecycle", () => {
           suggestedNextAction:
             "Assign an advisor to schedule a discovery conversation.",
         },
+        resolvedModel: "claude-sonnet-5-20260801",
         attemptCount: 2,
         inputTokens: 320,
         outputTokens: 72,
@@ -139,6 +141,8 @@ describe("triage run lifecycle", () => {
       status: "succeeded",
       category: "prospect",
       priority: "medium",
+      model: "claude-sonnet-5",
+      resolvedModel: "claude-sonnet-5-20260801",
       attemptCount: 2,
       inputTokens: 320,
       outputTokens: 72,
@@ -178,6 +182,7 @@ describe("triage run lifecycle", () => {
           priority: "low",
           suggestedNextAction: "Review manually or request more information.",
         },
+        resolvedModel: "claude-sonnet-5",
       },
       database,
     );
@@ -185,6 +190,19 @@ describe("triage run lifecycle", () => {
     expect(completed.status).toBe("needs_review");
     expect(completed.inputQuality).toBe("malformed");
     expect(completed.category).toBe("unknown");
+  });
+
+  it("rejects a successful terminal state without a resolved model", () => {
+    const database = testDatabase();
+    const processing = createProcessingRun(processingInput(), database);
+
+    expect(() =>
+      database
+        .prepare(
+          "UPDATE triage_runs SET status = 'succeeded' WHERE id = ? AND status = 'processing'",
+        )
+        .run(processing.id),
+    ).toThrow(/resolved model/u);
   });
 
   it("completes a failed run with a safe error and no result fields", () => {

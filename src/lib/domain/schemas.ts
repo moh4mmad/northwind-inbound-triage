@@ -36,19 +36,27 @@ export const inboundMessagesSchema = z
     });
   });
 
-const oneLine = z
-  .string()
-  .trim()
-  .min(1)
-  .max(240)
-  .refine((value) => !/[\r\n]/u.test(value), "Must be a single line");
+const UNSAFE_GENERATED_UNICODE = /[\p{Cc}\p{Cf}\p{Cs}]/u;
+
+function generatedLine(maxLength: number) {
+  return z
+    .string()
+    .trim()
+    .min(1)
+    .max(maxLength)
+    .refine((value) => !/[\r\n]/u.test(value), "Must be a single line")
+    .refine(
+      (value) => !UNSAFE_GENERATED_UNICODE.test(value),
+      "Must not contain control or Unicode formatting characters",
+    );
+}
 
 export const triageResultSchema = z
   .object({
-    summary: oneLine,
+    summary: generatedLine(240),
     category: z.enum(CATEGORY_KEYS),
     priority: z.enum(PRIORITY_KEYS),
-    suggestedNextAction: z.string().trim().min(1).max(400),
+    suggestedNextAction: generatedLine(400),
   })
   .strict();
 
@@ -60,30 +68,39 @@ export const qualityReasonSchema = z.enum([
   "unknown_organization",
   "low_context",
   "prompt_truncated",
+  "suspicious_unicode",
+  "suspicious_instructions",
 ]);
 
 export const triageRunSchema = z
   .object({
     id: z.number().int().positive(),
-    messageId: z.string(),
+    messageId: z.string().regex(/^inb-\d{3}$/),
     status: z.enum(RUN_STATUS_KEYS),
     inputQuality: z.enum(INPUT_QUALITY_KEYS),
     reviewReasons: z.array(qualityReasonSchema),
-    summary: z.string().nullable(),
+    summary: generatedLine(240).nullable(),
     category: z.enum(CATEGORY_KEYS).nullable(),
     priority: z.enum(PRIORITY_KEYS).nullable(),
-    suggestedNextAction: z.string().nullable(),
+    suggestedNextAction: generatedLine(400).nullable(),
     provider: z.enum(PROVIDER_KEYS),
-    model: z.string(),
-    promptVersion: z.string(),
-    errorCode: z.string().nullable(),
-    errorMessage: z.string().nullable(),
+    model: generatedLine(300),
+    resolvedModel: generatedLine(300).nullable(),
+    promptVersion: generatedLine(100),
+    errorCode: z
+      .string()
+      .trim()
+      .min(1)
+      .max(100)
+      .regex(/^[A-Z0-9_]+$/u)
+      .nullable(),
+    errorMessage: generatedLine(500).nullable(),
     attemptCount: z.number().int().positive(),
     inputTokens: z.number().int().nonnegative().nullable(),
     outputTokens: z.number().int().nonnegative().nullable(),
     durationMs: z.number().int().nonnegative().nullable(),
-    createdAt: z.string(),
-    completedAt: z.string().nullable(),
+    createdAt: z.string().datetime(),
+    completedAt: z.string().datetime().nullable(),
   })
   .strict();
 
@@ -97,6 +114,7 @@ export const messageListResponseSchema = z.object({
     name: z.enum(PROVIDER_KEYS),
     model: z.string(),
     configured: z.boolean(),
+    configurationStatus: z.enum(["locally_configured", "not_configured"]),
   }),
 });
 
@@ -113,12 +131,18 @@ export const triageWireJsonSchema = {
   properties: {
     summary: {
       type: "string",
+      minLength: 1,
+      maxLength: 240,
+      pattern: "^[^\\r\\n]+$",
       description: "A concise, factual one-line summary.",
     },
     category: { type: "string", enum: [...CATEGORY_KEYS] },
     priority: { type: "string", enum: [...PRIORITY_KEYS] },
     suggestedNextAction: {
       type: "string",
+      minLength: 1,
+      maxLength: 400,
+      pattern: "^[^\\r\\n]+$",
       description: "A concrete, advisory next step for a human reviewer.",
     },
   },

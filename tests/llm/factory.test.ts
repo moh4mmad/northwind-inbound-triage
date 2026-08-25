@@ -8,7 +8,6 @@ import {
 import type { OpenAIClientLike } from "@/lib/llm/openai";
 
 const baseConfig = {
-  model: "test-model",
   configured: true,
   apiKey: "test-key",
   awsRegion: "us-east-1",
@@ -26,21 +25,23 @@ const dependencies = {
 };
 
 describe("createTriageProvider", () => {
-  it.each(["anthropic", "openai", "bedrock"] as const)(
-    "creates only the configured %s adapter",
-    (provider) => {
-      const config: ProviderFactoryConfig = { ...baseConfig, provider };
-      expect(createTriageProvider(config, dependencies)).toMatchObject({
-        name: provider,
-        model: "test-model",
-      });
-    },
-  );
+  it.each([
+    ["anthropic", "claude-sonnet-5"],
+    ["openai", "gpt-5.6-terra"],
+    ["bedrock", "anthropic.claude-sonnet-4-6-v1:0"],
+  ] as const)("creates only the configured %s adapter", (provider, model) => {
+    const config: ProviderFactoryConfig = { ...baseConfig, provider, model };
+    expect(createTriageProvider(config, dependencies)).toMatchObject({
+      name: provider,
+      model,
+    });
+  });
 
   it("fails safely when the selected provider is not configured", () => {
     const config: ProviderFactoryConfig = {
       ...baseConfig,
       provider: "anthropic",
+      model: "claude-sonnet-5",
       configured: false,
       apiKey: undefined,
     };

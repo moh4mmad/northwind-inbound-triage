@@ -1,4 +1,11 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import BetterSqlite3 from "better-sqlite3";
@@ -41,7 +48,7 @@ describe("initializeDb", () => {
       .get() as { count: number };
 
     expect(messageCount.count).toBe(13);
-    expect(migrationCount.count).toBe(2);
+    expect(migrationCount.count).toBe(3);
     expect(database.pragma("foreign_keys", { simple: true })).toBe(1);
     expect(database.pragma("busy_timeout", { simple: true })).toBe(5_000);
   });
@@ -59,6 +66,29 @@ describe("initializeDb", () => {
 
     expect(database.name).toBe(databasePath);
     expect(database.pragma("journal_mode", { simple: true })).toBe("wal");
+    if (process.platform !== "win32") {
+      expect(statSync(join(directory, "nested")).mode & 0o777).toBe(0o700);
+      expect(statSync(databasePath).mode & 0o777).toBe(0o600);
+      expect(statSync(`${databasePath}-wal`).mode & 0o777).toBe(0o600);
+      expect(statSync(`${databasePath}-shm`).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it("does not chmod an existing custom parent directory", () => {
+    const directory = mkdtempSync(join(tmpdir(), "northwind-db-parent-"));
+    temporaryDirectories.push(directory);
+    chmodSync(directory, 0o755);
+
+    const database = initializeDb({
+      path: join(directory, "triage.sqlite"),
+      recoverStaleAfterMs: false,
+    });
+    openDatabases.push(database);
+
+    if (process.platform !== "win32") {
+      expect(statSync(directory).mode & 0o777).toBe(0o755);
+      expect(statSync(database.name).mode & 0o777).toBe(0o600);
+    }
   });
 
   it("keeps fixture rows immutable at the database boundary", () => {

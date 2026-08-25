@@ -52,6 +52,7 @@ export function createTriageProvider(
     {
       region: requireValue(config.awsRegion, config.provider),
       model: requireValue(config.model, config.provider),
+      timeoutMs: config.timeoutMs,
     },
     dependencies.bedrockClient,
   );
@@ -68,5 +69,5 @@ function requireValue(
   ) {
     throw providerError("configuration", provider);
   }
-  return value;
+  return value.trim();
 }

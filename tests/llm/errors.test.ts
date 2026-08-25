@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { ProviderError, toProviderError, toSafeError } from "@/lib/llm/errors";
+import {
+  ProviderError,
+  providerResponseError,
+  toProviderError,
+  toSafeError,
+  withAttemptCount,
+} from "@/lib/llm/errors";
 
 describe("toProviderError", () => {
   it.each([
@@ -28,6 +34,50 @@ describe("toProviderError", () => {
     const original = new ProviderError("invalid_output", "openai");
     expect(toProviderError(original, "openai")).toBe(original);
   });
+
+  it.each([
+    { status: 429, code: "insufficient_quota" },
+    { name: "ServiceQuotaExceededException" },
+    { error: { code: "billing_hard_limit_reached" } },
+  ])("maps permanent usage limits without retrying", (source) => {
+    expect(toProviderError(source, "openai")).toMatchObject({
+      code: "quota_exceeded",
+      retryable: false,
+    });
+  });
+
+  it("parses and caps Retry-After provider hints", () => {
+    const error = toProviderError(
+      { status: 429, headers: { "Retry-After": "120" } },
+      "anthropic",
+    );
+
+    expect(error).toMatchObject({
+      code: "rate_limit",
+      retryAfterMs: 30_000,
+    });
+    expect(withAttemptCount(error, 2)).toMatchObject({
+      attempts: 2,
+      retryAfterMs: 30_000,
+    });
+  });
+
+  it.each([
+    ["insufficient_quota", "quota_exceeded", false],
+    ["rate_limit_exceeded", "rate_limit", true],
+    ["invalid_api_key", "authentication", false],
+    ["model_not_found", "configuration", false],
+    ["content_filter", "refusal", false],
+    ["server_error", "provider_unavailable", true],
+  ] as const)(
+    "maps response-level code %s to a safe application error",
+    (source, code, retryable) => {
+      expect(providerResponseError(source, "openai")).toMatchObject({
+        code,
+        retryable,
+      });
+    },
+  );
 
   it.each([
     [new AnthropicTimeoutError(), "anthropic", "timeout", true],

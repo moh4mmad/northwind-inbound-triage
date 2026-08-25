@@ -1,0 +1,10 @@
+{
+  "triage-v1": {
+    "artifact": "triage-v1.md",
+    "runtimeSystemPromptSha256": "57f3a7a315b5b023b6c217ace37a8357dbec149ff9fed5191b4392736a107a99"
+  },
+  "triage-v2": {
+    "artifact": "triage-v2.md",
+    "runtimeSystemPromptSha256": "27cb1c2d7b12e920397e046afb3e6ba5987c74f883d7f18f9bce872993ffdf3a"
+  }
+}

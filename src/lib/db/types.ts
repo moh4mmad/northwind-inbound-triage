@@ -29,6 +29,8 @@ export interface CreateProcessingRunInput {
 export interface CompleteRunSuccessInput {
   status: "succeeded" | "needs_review";
   result: TriageResult;
+  /** Safe provider-returned model label used for audit history. */
+  resolvedModel: string;
   attemptCount?: number;
   inputTokens?: number | null;
   outputTokens?: number | null;
@@ -43,6 +45,7 @@ export interface CompleteRunFailureInput {
   inputTokens?: number | null;
   outputTokens?: number | null;
   durationMs?: number | null;
+  resolvedModel?: string | null;
   now?: Date;
 }
 

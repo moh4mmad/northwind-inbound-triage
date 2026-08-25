@@ -3,9 +3,7 @@ import { initializeDb } from "../src/lib/db/connection";
 
 nextEnv.loadEnvConfig(process.cwd());
 
-const database = initializeDb({
-  path: process.env.DATABASE_PATH ?? "./data/triage.sqlite",
-});
+const database = initializeDb();
 
 try {
   const row = database

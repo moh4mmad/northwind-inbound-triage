@@ -1,7 +1,10 @@
 import "server-only";
 
 import Anthropic from "@anthropic-ai/sdk";
+import { jsonSchemaOutputFormat } from "@anthropic-ai/sdk/helpers/json-schema";
 import { providerError, toProviderError } from "./errors";
+import { MAX_PROVIDER_ATTEMPT_TIMEOUT_MS } from "./limits";
+import { supportsAnthropicStructuredTriage } from "./model-capabilities";
 import { parseStructuredOutput } from "./structured-output";
 import {
   DEFAULT_MAX_OUTPUT_TOKENS,
@@ -34,16 +37,23 @@ export class AnthropicTriageProvider implements TriageProvider {
     if (options.apiKey.trim().length === 0) {
       throw providerError("configuration", this.name);
     }
-    if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
+    if (
+      !Number.isFinite(options.timeoutMs) ||
+      options.timeoutMs <= 0 ||
+      options.timeoutMs > MAX_PROVIDER_ATTEMPT_TIMEOUT_MS
+    ) {
       throw providerError("configuration", this.name);
     }
 
     this.model = options.model?.trim() || DEFAULT_ANTHROPIC_MODEL;
+    if (!supportsAnthropicStructuredTriage(this.model)) {
+      throw providerError("configuration", this.name);
+    }
     this.timeoutMs = options.timeoutMs;
     this.client =
       client ??
       new Anthropic({
-        apiKey: options.apiKey,
+        apiKey: options.apiKey.trim(),
         maxRetries: 0,
         timeout: options.timeoutMs,
       });
@@ -51,6 +61,9 @@ export class AnthropicTriageProvider implements TriageProvider {
 
   async analyze(request: TriageProviderRequest): Promise<TriageProviderResult> {
     try {
+      const outputFormat = jsonSchemaOutputFormat(
+        request.schema as Parameters<typeof jsonSchemaOutputFormat>[0],
+      );
       const response = await this.client.messages.create(
         {
           model: this.model,
@@ -58,9 +71,10 @@ export class AnthropicTriageProvider implements TriageProvider {
           system: request.systemPrompt,
           messages: [{ role: "user", content: request.userPrompt }],
           output_config: {
+            effort: "low",
             format: {
-              type: "json_schema",
-              schema: request.schema,
+              type: outputFormat.type,
+              schema: outputFormat.schema,
             },
           },
         },

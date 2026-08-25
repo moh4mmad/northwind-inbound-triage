@@ -1,7 +1,16 @@
 import "server-only";
 
 import OpenAI from "openai";
-import { providerError, toProviderError } from "./errors";
+import {
+  providerError,
+  providerResponseError,
+  toProviderError,
+} from "./errors";
+import { MAX_PROVIDER_ATTEMPT_TIMEOUT_MS } from "./limits";
+import {
+  openAIReasoningEffort,
+  supportsOpenAIStructuredTriage,
+} from "./model-capabilities";
 import { parseStructuredOutput } from "./structured-output";
 import {
   DEFAULT_MAX_OUTPUT_TOKENS,
@@ -32,16 +41,23 @@ export class OpenAITriageProvider implements TriageProvider {
     if (options.apiKey.trim().length === 0) {
       throw providerError("configuration", this.name);
     }
-    if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
+    if (
+      !Number.isFinite(options.timeoutMs) ||
+      options.timeoutMs <= 0 ||
+      options.timeoutMs > MAX_PROVIDER_ATTEMPT_TIMEOUT_MS
+    ) {
       throw providerError("configuration", this.name);
     }
 
     this.model = options.model?.trim() || DEFAULT_OPENAI_MODEL;
+    if (!supportsOpenAIStructuredTriage(this.model)) {
+      throw providerError("configuration", this.name);
+    }
     this.timeoutMs = options.timeoutMs;
     this.client =
       client ??
       new OpenAI({
-        apiKey: options.apiKey,
+        apiKey: options.apiKey.trim(),
         maxRetries: 0,
         timeout: options.timeoutMs,
       });
@@ -49,6 +65,7 @@ export class OpenAITriageProvider implements TriageProvider {
 
   async analyze(request: TriageProviderRequest): Promise<TriageProviderResult> {
     try {
+      const reasoningEffort = openAIReasoningEffort(this.model);
       const response = await this.client.responses.create(
         {
           model: this.model,
@@ -56,7 +73,9 @@ export class OpenAITriageProvider implements TriageProvider {
           input: request.userPrompt,
           max_output_tokens:
             request.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
-          reasoning: { effort: "none" },
+          ...(reasoningEffort
+            ? { reasoning: { effort: reasoningEffort } }
+            : {}),
           store: false,
           text: {
             format: {
@@ -83,16 +102,22 @@ export class OpenAITriageProvider implements TriageProvider {
       if (refused || response.incomplete_details?.reason === "content_filter") {
         throw providerError("refusal", this.name);
       }
-      if (
-        response.error ||
-        (response.status !== undefined && response.status !== "completed")
-      ) {
+      if (response.status !== undefined && response.status !== "completed") {
+        if (response.error) {
+          throw providerResponseError(response.error.code, this.name);
+        }
         if (response.status === "incomplete") {
           throw providerError("invalid_output", this.name);
+        }
+        if (response.status === "cancelled") {
+          throw providerError("cancelled", this.name);
         }
         throw providerError("provider_unavailable", this.name, {
           retryable: true,
         });
+      }
+      if (response.error) {
+        throw providerResponseError(response.error.code, this.name);
       }
 
       return {

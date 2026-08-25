@@ -46,6 +46,7 @@ interface TriageRunRow {
   suggested_next_action: string | null;
   provider: string;
   model: string;
+  resolved_model: string | null;
   prompt_version: string;
   error_code: string | null;
   error_message: string | null;
@@ -69,6 +70,7 @@ interface MessageViewRow extends MessageRow {
   run_suggested_next_action: string | null;
   run_provider: string | null;
   run_model: string | null;
+  run_resolved_model: string | null;
   run_prompt_version: string | null;
   run_error_code: string | null;
   run_error_message: string | null;
@@ -92,6 +94,7 @@ const RUN_COLUMNS = `
   suggested_next_action,
   provider,
   model,
+  resolved_model,
   prompt_version,
   error_code,
   error_message,
@@ -127,6 +130,7 @@ function mapRun(row: TriageRunRow): TriageRun {
     suggestedNextAction: row.suggested_next_action,
     provider: row.provider,
     model: row.model,
+    resolvedModel: row.resolved_model,
     promptVersion: row.prompt_version,
     errorCode: row.error_code,
     errorMessage: row.error_message,
@@ -155,6 +159,7 @@ function mapMessageView(row: MessageViewRow): MessageView {
           suggested_next_action: row.run_suggested_next_action,
           provider: row.run_provider ?? "",
           model: row.run_model ?? "",
+          resolved_model: row.run_resolved_model,
           prompt_version: row.run_prompt_version ?? "",
           error_code: row.run_error_code,
           error_message: row.run_error_message,
@@ -257,6 +262,7 @@ export function listMessageViews(
         r.suggested_next_action AS run_suggested_next_action,
         r.provider AS run_provider,
         r.model AS run_model,
+        r.resolved_model AS run_resolved_model,
         r.prompt_version AS run_prompt_version,
         r.error_code AS run_error_code,
         r.error_message AS run_error_message,
@@ -393,6 +399,7 @@ export function completeRunSuccess(
         category = ?,
         priority = ?,
         suggested_next_action = ?,
+        resolved_model = ?,
         attempt_count = COALESCE(MAX(attempt_count, ?), attempt_count),
         input_tokens = ?,
         output_tokens = ?,
@@ -407,6 +414,7 @@ export function completeRunSuccess(
       result.category,
       result.priority,
       result.suggestedNextAction,
+      requiredText(input.resolvedModel, "resolvedModel", 300),
       attemptCount,
       optionalMetric(input.inputTokens, "inputTokens"),
       optionalMetric(input.outputTokens, "outputTokens"),
@@ -442,6 +450,7 @@ export function completeRunFailure(
         status = 'failed',
         error_code = ?,
         error_message = ?,
+        resolved_model = ?,
         attempt_count = COALESCE(MAX(attempt_count, ?), attempt_count),
         input_tokens = ?,
         output_tokens = ?,
@@ -453,6 +462,9 @@ export function completeRunFailure(
     .run(
       requiredText(input.errorCode, "errorCode", 100),
       requiredText(input.errorMessage, "errorMessage", 500),
+      input.resolvedModel === undefined || input.resolvedModel === null
+        ? null
+        : requiredText(input.resolvedModel, "resolvedModel", 300),
       attemptCount,
       optionalMetric(input.inputTokens, "inputTokens"),
       optionalMetric(input.outputTokens, "outputTokens"),

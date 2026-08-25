@@ -54,9 +54,9 @@ export const PRIORITY_KEYS = ["high", "medium", "low"] as const;
 export type Priority = (typeof PRIORITY_KEYS)[number];
 
 export const PRIORITY_DEFINITIONS: Record<Priority, string> = {
-  high: "An explicit short deadline, active-client harm or complaint, security/compliance concern, or immediate financial consequence.",
+  high: "An external deadline within five business days with a real client or business consequence, active-client harm or complaint, an actual security/compliance incident or obligation, or immediate financial consequence.",
   medium:
-    "Legitimate, actionable relationship work without immediate harm or a short deadline.",
+    "Legitimate, actionable relationship work without current harm, immediate financial consequence, or a consequence-bearing deadline within five business days.",
   low: "No-rush inquiries, unsolicited outreach, newsletters, spam, or general noise.",
 };
 

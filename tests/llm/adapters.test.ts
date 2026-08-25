@@ -29,7 +29,15 @@ const request: TriageProviderRequest = {
   schema: {
     type: "object",
     additionalProperties: false,
-    properties: { summary: { type: "string" } },
+    properties: {
+      summary: {
+        type: "string",
+        minLength: 1,
+        maxLength: 240,
+        pattern: "^[^\\r\\n]+$",
+        description: "A concise summary.",
+      },
+    },
     required: ["summary"],
   },
   signal: new AbortController().signal,
@@ -62,7 +70,8 @@ describe("AnthropicTriageProvider", () => {
         system: request.systemPrompt,
         messages: [{ role: "user", content: request.userPrompt }],
         output_config: {
-          format: { type: "json_schema", schema: request.schema },
+          effort: "low",
+          format: { type: "json_schema", schema: expect.any(Object) },
         },
       }),
       expect.objectContaining({
@@ -71,6 +80,15 @@ describe("AnthropicTriageProvider", () => {
         signal: request.signal,
       }),
     );
+    const sentSchema = create.mock.calls[0]?.[0].output_config.format
+      .schema as {
+      properties: { summary: Record<string, unknown> };
+    };
+    expect(sentSchema.properties.summary).not.toHaveProperty("minLength");
+    expect(sentSchema.properties.summary).not.toHaveProperty("maxLength");
+    expect(sentSchema.properties.summary).not.toHaveProperty("pattern");
+    expect(sentSchema.properties.summary.description).toContain("minLength");
+    expect(JSON.stringify(request.schema)).toContain('"minLength":1');
     expect(create.mock.calls[0]?.[0]).not.toHaveProperty("temperature");
   });
 
@@ -166,6 +184,53 @@ describe("OpenAITriageProvider", () => {
       retryable: false,
     });
   });
+
+  it("omits reasoning parameters for models without a verified none effort", async () => {
+    const create = vi.fn().mockResolvedValue({
+      model: "gpt-4o-mini",
+      status: "completed",
+      error: null,
+      incomplete_details: null,
+      output_text: JSON.stringify(structuredResult),
+      output: [],
+      usage: { input_tokens: 10, output_tokens: 5 },
+    });
+    const client = { responses: { create } } as unknown as OpenAIClientLike;
+    const provider = new OpenAITriageProvider(
+      { apiKey: "test-key", model: "gpt-4o-mini", timeoutMs: 2_000 },
+      client,
+    );
+
+    await provider.analyze(request);
+
+    expect(create.mock.calls[0]?.[0]).not.toHaveProperty("reasoning");
+  });
+
+  it("maps response-level quota errors without exposing provider details", async () => {
+    const create = vi.fn().mockResolvedValue({
+      model: "gpt-5.6-terra",
+      status: "failed",
+      error: {
+        code: "insufficient_quota",
+        message: "raw billing account detail",
+      },
+      incomplete_details: null,
+      output_text: "",
+      output: [],
+      usage: undefined,
+    });
+    const client = { responses: { create } } as unknown as OpenAIClientLike;
+    const provider = new OpenAITriageProvider(
+      { apiKey: "test-key", timeoutMs: 2_000 },
+      client,
+    );
+
+    const error = await provider
+      .analyze(request)
+      .catch((reason: unknown) => reason);
+    expect(error).toMatchObject({ code: "quota_exceeded", retryable: false });
+    expect((error as Error).message).not.toContain("billing account detail");
+  });
 });
 
 describe("BedrockTriageProvider", () => {
@@ -185,21 +250,25 @@ describe("BedrockTriageProvider", () => {
     const send = vi.fn().mockResolvedValue(response);
     const client = { send } as unknown as BedrockClientLike;
     const provider = new BedrockTriageProvider(
-      { region: "us-east-1", model: "anthropic.claude-sonnet-5" },
+      {
+        region: "us-east-1",
+        model: "anthropic.claude-sonnet-4-6-20260801-v1:0",
+        timeoutMs: 120_000,
+      },
       client,
     );
 
     await expect(provider.analyze(request)).resolves.toEqual({
       output: structuredResult,
       provider: "bedrock",
-      model: "anthropic.claude-sonnet-5",
+      model: "anthropic.claude-sonnet-4-6-20260801-v1:0",
       usage: { inputTokens: 80, outputTokens: 20 },
     });
 
     const command = send.mock.calls[0]?.[0];
     expect(command).toBeInstanceOf(ConverseCommand);
     expect((command as ConverseCommand).input).toMatchObject({
-      modelId: "anthropic.claude-sonnet-5",
+      modelId: "anthropic.claude-sonnet-4-6-20260801-v1:0",
       system: [{ text: request.systemPrompt }],
       messages: [{ role: "user", content: [{ text: request.userPrompt }] }],
       outputConfig: {
@@ -208,12 +277,26 @@ describe("BedrockTriageProvider", () => {
           structure: {
             jsonSchema: {
               name: "inbound_triage",
-              schema: JSON.stringify(request.schema),
+              schema: expect.any(String),
             },
           },
         },
       },
     });
+    const schemaText = (command as ConverseCommand).input.outputConfig
+      ?.textFormat?.structure?.jsonSchema?.schema;
+    expect(schemaText).toBeTypeOf("string");
+    const sentSchema = JSON.parse(schemaText ?? "{}") as {
+      properties: { summary: Record<string, unknown> };
+    };
+    expect(sentSchema.properties.summary).not.toHaveProperty("minLength");
+    expect(sentSchema.properties.summary).not.toHaveProperty("maxLength");
+    expect(sentSchema.properties.summary).not.toHaveProperty("pattern");
+    expect(sentSchema.properties.summary.description).toContain(
+      "Application-enforced constraints",
+    );
+    expect(sentSchema.properties.summary.description).toContain("minLength");
+    expect(JSON.stringify(request.schema)).toContain('"minLength":1');
     expect(send.mock.calls[0]?.[1]).toEqual({ abortSignal: request.signal });
   });
 
@@ -225,7 +308,11 @@ describe("BedrockTriageProvider", () => {
     });
     const client = { send } as unknown as BedrockClientLike;
     const provider = new BedrockTriageProvider(
-      { region: "us-east-1", model: "anthropic.claude-sonnet-5" },
+      {
+        region: "us-east-1",
+        model: "anthropic.claude-sonnet-4-6-v1:0",
+        timeoutMs: 120_000,
+      },
       client,
     );
 
