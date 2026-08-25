@@ -1,10 +1,10 @@
 # Northwind Inbound Triage
 
-A local-first inbox that uses one selected LLM to summarize, classify, prioritize, and suggest a human next step for each inbound message. Source messages remain immutable, every attempt is appended to SQLite, failures stay isolated per row, and uncertain or suspicious inputs are routed to review.
+A local-first inbox that uses an LLM to summarize, classify, prioritize, and suggest a human next step for each inbound message. Source messages remain immutable, triage attempts are appended to SQLite, and one malformed message or provider failure cannot stop the rest of the queue.
 
 ## Quick start
 
-Requirements: Node.js 22.13+. Provider credentials are only needed to analyze messages; the inbox and setup guidance load without them.
+Requirements: Node.js 22.13+. Credentials are only required to analyze messages; the inbox and provider setup guidance load without them.
 
 ```bash
 npm install
@@ -15,7 +15,7 @@ npm run db:setup
 npm run dev
 ```
 
-Open `http://127.0.0.1:3000`. The `dev` and `start` scripts bind only to `127.0.0.1`.
+Open `http://127.0.0.1:3000`.
 
 | Provider            | Select with              | Required local configuration                                     |
 | ------------------- | ------------------------ | ---------------------------------------------------------------- |
@@ -23,9 +23,23 @@ Open `http://127.0.0.1:3000`. The `dev` and `start` scripts bind only to `127.0.
 | OpenAI              | `LLM_PROVIDER=openai`    | `OPENAI_API_KEY`, supported `OPENAI_MODEL`                       |
 | Amazon Bedrock      | `LLM_PROVIDER=bedrock`   | AWS credential chain, `AWS_REGION`, supported `BEDROCK_MODEL_ID` |
 
-Only the selected adapter is created, and there is no silent provider fallback. Model IDs are checked against the adapter's supported structured-output families. The UI deliberately says **Configured locally**: this confirms only the explicit local settings the app can inspect and model-ID compatibility, not ambient AWS credential availability, live authentication, model access, quota, or regional availability. Those are verified on the first provider request.
+Only the selected adapter is created; provider errors never trigger a silent fallback to another provider. **Configured locally** means the selected model and explicit local settings are syntactically valid. Authentication, model access, quota, and Bedrock credential availability are verified only when the first provider request is made.
 
-The app attempts POSIX owner-only modes for the default `data/` directory (`0700`) and SQLite database/WAL/SHM files (`0600`). After copying or restoring data, verify them with `ls -la data .env.local`; repair with `chmod 700 data` and `chmod 600 .env.local data/triage.sqlite*`.
+## Design choices and tradeoffs
+
+- **Next.js:** keeps the React inbox and server-only provider/database boundary in one small project. It is slightly more framework than a client-only React app, but avoids a separate API service and prevents API keys from reaching the browser.
+- **SQLite:** fits a local, single-user tool and preserves immutable messages with append-only triage history. It is not suitable for distributed workers or 10,000 messages per day without moving to managed storage and a durable queue.
+- **One LLM call per item:** matches the brief and isolates failures by row. Analyze All uses three workers, with a matching server concurrency cap and configurable minute/day admission limits to bound paid work.
+- **Structured output with independent validation:** each provider receives a JSON Schema, and the returned value must also pass the shared Zod schema. Malformed output becomes a visible, retryable row failure rather than corrupting the queue.
+- **Human review over false confidence:** near-empty, garbled, low-context, suspicious, Unicode-obfuscated, or truncated inputs still go to the LLM for a bounded summary, but deterministic rules force **Needs review**. Suggested actions are advisory only and are never executed.
+
+Provider calls use bounded timeouts, transient-only retries, and safe error messages. The application is intentionally local-only and has no authentication; deployment would require authenticated authorization, TLS, managed secrets, retention controls, and an approved policy for sending advisory messages to model providers. See [`RATIONALE.md`](./RATIONALE.md) for detailed trust boundaries, scaling risks, and implementation references.
+
+## Prompt and evaluation
+
+[`prompts/triage-v2.md`](./prompts/triage-v2.md) is the runtime prompt. It treats every inbound field as untrusted data, defines category and priority precedence, and constrains sensitive suggested actions. Provider-native structured output is followed by Zod validation and a deterministic output policy.
+
+The normal test suite uses mocks and makes no paid provider calls. `npm run eval` is opt-in, makes paid calls to the selected provider, and checks the supplied queue plus adversarial fixtures against checked-in quality and safety thresholds.
 
 ```bash
 npm run format:check
@@ -35,27 +49,10 @@ npm test
 npm run build
 ```
 
-## Safety and reliability boundaries
-
-- **Local-only, not deployable as-is:** there is intentionally no user authentication or authorization. Loopback binding, a strict localhost/loopback host allowlist, rejection of conflicting browser origins, JSON-only mutations, a required application header, a small request-body limit, and browser security headers reduce accidental exposure; they are not authentication. **Adding authenticated authorization at the page and API boundaries is a deployment blocker**, alongside TLS, secrets management, and an approved data-governance posture.
-- **Bounded paid work:** Analyze All and the server admit at most three concurrent analyses. In-process fixed-window limits default to 30 requests/minute and 500/day (`TRIAGE_REQUESTS_PER_MINUTE`, `TRIAGE_REQUESTS_PER_DAY`). A unique processing run blocks simultaneous work on the same message.
-- **Bounded provider calls:** provider-specific attempt limits default to 30 seconds for Anthropic/OpenAI and 180 seconds for Bedrock to accommodate first-use schema compilation; an overall retry deadline defaults to 240 seconds. `LLM_MAX_ATTEMPTS` defaults to two and is capped at three. Retries are limited to transient failures, use jitter, honor bounded `Retry-After`, and surface safe retryability to the UI. Bedrock can still exceed this bound when AWS takes several minutes to compile a new schema, in which case the run fails safely and can be retried.
-- **Prompt v2 guardrails:** every inbound field is untrusted data; marker-significant characters are escaped before interpolation. NFKC normalization removes and flags dangerous control/format Unicode. Long bodies use an 8,000-character head-and-tail projection with an explicit omission marker. Suspicious instructions, Unicode, and truncation always require human review while the raw stored message remains unchanged.
-- **Safe advisory output:** provider-native structured output is followed by independent Zod validation. Bedrock receives a compatibility projection for schema keywords it does not support, while Zod still enforces the full enum, length, one-line, Unicode, and no-extra-field contract. A separate policy rejects suggested actions that use sender-supplied destinations, disclose credentials or sensitive records without verification, or execute financial transactions. The app never sends a reply or performs the suggestion.
-- **Audit without browser overexposure:** each run records the configured model and the sanitized adapter-resolved model (the provider response when available). The browser receives source fields needed by the inbox plus a narrow latest-result DTO; provider identifiers, prompt version, tokens, attempts, and timing stay server-side. Mutation responses are runtime-validated before client state changes.
-
-SQLite and the in-process admission controller are appropriate for this single-user take-home. A production service still needs a durable queue, idempotency/leases, managed storage, distributed rate limits and quotas, role-based access, retention/deletion policy, encryption/key management, provider data-processing approval, observability, and incident controls.
-
-## Prompt and evaluation
-
-[`prompts/triage-v2.md`](./prompts/triage-v2.md) is the runtime prompt; `triage-v1.md` remains immutable history and `manifest.json` pins prompt hashes. [`evals/golden.json`](./evals/golden.json) covers the supplied queue, while [`evals/adversarial.json`](./evals/adversarial.json) covers delimiter injection, category precedence, tail-only urgency, invisible Unicode, and sender-provided destinations.
-
-`npm run eval` is opt-in and **makes paid calls** to the selected provider. It exits nonzero below the checked-in valid-output/category/priority thresholds or on any unsafe action, unguarded high-priority false negative, or missed required review. The normal `npm test` suite uses deterministic fixtures/mocks and makes no paid calls; `npm run eval` must remain outside CI.
-
 ## Airtable and automation extension
 
-I would map immutable source fields to **Inbound Messages** and append-only results to linked **Triage Runs**. An n8n flow could trigger from a successful high-priority run, create an internal review task, and notify the designated advisor. A human approval step would remain mandatory before client-facing or consequential action.
+In Airtable, I would use **Inbound Messages** for immutable source fields and a linked **Triage Runs** table for append-only attempts and results. An n8n automation could trigger when a high-priority run succeeds, create an internal review task, and notify the designated advisor. Human approval would remain mandatory before any client-facing or consequential action.
 
 ## AI use
 
-AI assistance accelerated option comparison, scaffolding, and adversarial review. Human judgment set the taxonomy, priority policy, deterministic review rules, safety boundary, provider contract, persistence model, and final acceptance checks. See [`RATIONALE.md`](./RATIONALE.md) for the engineering reasoning and [`docs/loom-outline.md`](./docs/loom-outline.md) for the short demo plan.
+I used AI assistance for option comparison, scaffolding, and adversarial review, then reviewed and tested every resulting decision. In one controlled prompt ablation, the model labeled the vague `inb-009` follow-up as `prospect / medium`, inventing a lead and urgency that were not present. I rejected that classification, retained an explicit `unknown` category, and added a deterministic low-context review rule; the final behavior is `unknown / low` with human review. The full engineering reasoning is in [`RATIONALE.md`](./RATIONALE.md).
